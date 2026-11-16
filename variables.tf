@@ -17,7 +17,7 @@ variable "db_user" {
 variable "db_password" {
   description = "PostgreSQL password (simulated lab value - in production use a secret, e.g. TF_VAR_db_password)."
   type        = string
-  default     = "strongpassword123"
+  default     = "NewPassword2026!"
   sensitive   = true # hidden in plan/apply output
 }
 
