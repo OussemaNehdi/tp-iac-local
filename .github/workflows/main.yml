@@ -1,0 +1,105 @@
+# .github/workflows/main.yml - CI/CD pipeline for the Terraform infrastructure
+# Runs on every push to main: Setup Terraform -> Init -> Plan -> Apply
+name: Terraform IaC CI/CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # also allows a manual run from the "Actions" tab
+
+env:
+  TF_IN_AUTOMATION: "true" # shorter, non-interactive Terraform output
+  TF_INPUT: "false"        # never wait for keyboard input
+
+jobs:
+  # ---------- Job 1: Validation & Review ----------
+  plan:
+    name: Plan (validation & review)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform           # DLC: Preparation
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.17.2"
+
+      - name: Terraform Init            # DLC: Initialisation of the state
+        run: terraform init
+
+      - name: Terraform Format & Validate
+        run: |
+          terraform fmt -check -recursive
+          terraform validate
+
+      - name: Terraform Plan            # DLC: Validation & Review (detect the changes)
+        run: terraform plan -out=tfplan
+
+      - name: Save the plan for the Apply job
+        uses: actions/upload-artifact@v7
+        with:
+          name: tfplan
+          path: tfplan
+          retention-days: 1
+
+  # ---------- Job 2: Continuous Deployment ----------
+  apply:
+    name: Apply (continuous deployment)
+    needs: plan                         # GATE: runs ONLY if the Plan job succeeded
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform           # DLC: Preparation
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.17.2"
+          terraform_wrapper: false      # lets us read raw "terraform output/console" values
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Download the reviewed plan
+        uses: actions/download-artifact@v8
+        with:
+          name: tfplan
+
+      - name: Terraform Apply           # DLC: Continuous Deployment (apply the changes)
+        run: terraform apply -auto-approve tfplan
+
+      - name: Validate the deployment   # DLC: Validation
+        run: |
+          echo "--- Containers ---"
+          docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+          echo "--- Web application ---"
+          sleep 3
+          curl -sf http://localhost:8080/ | tee page.html
+          grep -q "Application Deployed via Terraform IaC!" page.html
+          echo "--- Database login with the password from variables.tf ---"
+          PW=$(echo 'nonsensitive(var.db_password)' | terraform console | tr -d '"')
+          echo "::add-mask::$PW"
+          DB_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' tp-db-postgres)
+          for i in $(seq 1 30); do   # wait until PostgreSQL accepts TCP connections
+            docker exec tp-db-postgres pg_isready -q -h "$DB_IP" && break; sleep 1
+          done
+          # TCP connection -> PostgreSQL really checks the password
+          docker exec -e PGPASSWORD="$PW" tp-db-postgres \
+            psql -h "$DB_IP" -U devops_user -d devops_db \
+            -c "SELECT 'login OK' AS result, current_user, current_database(), now();"
+          echo "--- Terraform outputs ---"
+          terraform output
+
+      - name: Write the job summary
+        if: always()
+        run: |
+          {
+            echo "## Terraform deployment"
+            echo '```'
+            terraform output 2>/dev/null || true
+            docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+            echo '```'
+            echo "Commit: \`${GITHUB_SHA::7}\` - page served: $(cat page.html 2>/dev/null)"
+          } >> "$GITHUB_STEP_SUMMARY"
