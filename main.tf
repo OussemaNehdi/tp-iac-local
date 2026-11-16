@@ -25,7 +25,7 @@ resource "docker_image" "postgres_image" {
 # Create and configure the PostgreSQL container
 resource "docker_container" "db_container" {
   name  = "tp-db-postgres"
-  image = docker_image.postgres_image.latest # provider v3: "image_id" (the old ".latest" was removed)
+  image = docker_image.postgres_image.image_id # provider v3: "image_id" (the old ".latest" was removed)
 
   ports {
     internal = 5432
